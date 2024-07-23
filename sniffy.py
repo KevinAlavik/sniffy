@@ -35,7 +35,7 @@ def parse_arguments():
     parser.add_argument("--logfile", help="File to write logs to. If not provided, logs will be printed to console.")
     parser.add_argument("--show-dns", action="store_true", help="Show DNS details if present.")
     parser.add_argument("--packet-count", type=int, default=-1, help="Number of packets to capture. Default is unlimited.")
-    parser.add_argument("--protocol", choices=['tcp', 'udp', 'icmp', 'arp'], help="Filter packets by protocol.")
+    parser.add_argument("--protocol", choices=['tcp', 'udp', 'icmp', 'arp', 'http', 'https', 'ftp', 'smtp'], help="Filter packets by protocol.")
     parser.add_argument("--full-payload", choices=['yes', 'no', 'true', 'false', 1, 0], default='no', help="If true verbose will output full payload (if there is a available one) as hex.")
     return parser.parse_args()
 
@@ -44,7 +44,11 @@ def protocol_name(proto: int) -> str:
         1: 'ICMP',
         6: 'TCP',
         17: 'UDP',
-        0x0806: 'ARP'
+        0x0806: 'ARP',
+        80: 'HTTP',
+        443: 'HTTPS',
+        21: 'FTP',
+        25: 'SMTP'
     }
     return protocol_map.get(proto, f'Unknown ({proto})')
 
@@ -113,9 +117,9 @@ def log_detailed_info(logger, packet, args):
             if raw_layer:
                 payload = raw_layer.load
                 logger.debug(f"  Payload Length:         {len(payload)} bytes")
-                logger.debug(f"  Payload Sample:         {payload[:20].hex()}...")  
+                logger.debug(f"  Payload Sample:         {payload[:20].hex()}...")
                 if args.full_payload in ['yes', 'true', 1]:
-                    logger.debug(f"  Payload Full:           {payload.hex()}")  
+                    logger.debug(f"  Payload Full:           {payload.hex()}")
                 else:
                     logger.debug(f"  Payload Full:           <disabled>")
     except Exception as e:
@@ -148,6 +152,12 @@ def log_dns_details(logger, packet):
                         logger.debug(f"    Address: {answer.rdata}")
                     elif answer.type == 5:
                         logger.debug(f"    CNAME: {answer.rdata.decode(errors='ignore')}")
+                    elif answer.type == 2:
+                        logger.debug(f"    NS: {answer.rdata.decode(errors='ignore')}")
+                    elif answer.type == 12:
+                        logger.debug(f"    PTR: {answer.rdata.decode(errors='ignore')}")
+                    elif answer.type == 15:
+                        logger.debug(f"    MX: {answer.rdata.decode(errors='ignore')}")
     except Exception as e:
         logger.error(f"Error in log_dns_details: {e}")
 
