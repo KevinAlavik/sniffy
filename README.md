@@ -45,7 +45,7 @@
 1. **Clone the Repository**
 
    ```bash
-   git clone https://github.com/your-repo/sniffy.git
+   git clone https://github.com/KevinAlavik/sniffy.git
    cd sniffy
    ```
 
