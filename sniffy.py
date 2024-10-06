@@ -4,6 +4,7 @@ import os
 import netifaces
 from scapy.all import *
 from loguru import logger
+import json
 
 def setup_logging(log_file=None, debug=False):
     logger.remove()
@@ -37,6 +38,8 @@ def parse_arguments():
     parser.add_argument("--packet-count", type=int, default=-1, help="Number of packets to capture. Default is unlimited.")
     parser.add_argument("--protocol", choices=['tcp', 'udp', 'icmp', 'arp', 'http', 'https', 'ftp', 'smtp'], help="Filter packets by protocol.")
     parser.add_argument("--full-payload", choices=['yes', 'no', 'true', 'false', 1, 0], default='no', help="If true verbose will output full payload (if there is a available one) as hex.")
+    parser.add_argument("--save", help="File to save captured packets in JSON format.")
+    parser.add_argument("--gui", action="store_true", help="Enable GUI for visualizing packets.")
     return parser.parse_args()
 
 def protocol_name(proto: int) -> str:
@@ -63,26 +66,18 @@ def log_detailed_info(logger, packet, args):
         if args.verbose:
             ip_layer = packet[IP]
 
-            
             protocol_str = protocol_name(ip_layer.proto)
             length = len(packet)
             src_ip = ip_layer.src
             dst_ip = ip_layer.dst
 
-            
-            tcp_layer = packet[TCP] if packet.haslayer(TCP) else None
-            udp_layer = packet[UDP] if packet.haslayer(UDP) else None
-            icmp_layer = packet[ICMP] if packet.haslayer(ICMP) else None
-            arp_layer = packet[ARP] if packet.haslayer(ARP) else None
-            raw_layer = packet[Raw] if packet.haslayer(Raw) else None
-
-            
             logger.debug(f"  Protocol:               {protocol_str}")
             logger.debug(f"  Length:                 {length} bytes")
             logger.debug(f"  Source IP:              {src_ip}")
             logger.debug(f"  Destination IP:         {dst_ip}")
 
-            if tcp_layer:
+            if TCP in packet:
+                tcp_layer = packet[TCP]
                 flags = str(tcp_layer.flags)
                 logger.debug(f"  Source Port:            {tcp_layer.sport}")
                 logger.debug(f"  Destination Port:       {tcp_layer.dport}")
@@ -92,18 +87,26 @@ def log_detailed_info(logger, packet, args):
                 logger.debug(f"  Sequence Number:        {tcp_layer.seq}")
                 logger.debug(f"  Acknowledgment Number:  {tcp_layer.ack}")
 
-            if udp_layer:
+                # TLS handshake detection
+                if tcp_layer.dport == 443 or tcp_layer.sport == 443:
+                    if Raw in packet and packet[Raw].load:
+                        logger.debug(f"  TLS Handshake detected: {packet[Raw].load[:50].hex()}...")
+
+            if UDP in packet:
+                udp_layer = packet[UDP]
                 logger.debug(f"  Source Port:            {udp_layer.sport}")
                 logger.debug(f"  Destination Port:       {udp_layer.dport}")
                 logger.debug(f"  Length:                 {udp_layer.len}")
                 logger.debug(f"  Checksum:               {udp_layer.chksum}")
 
-            if icmp_layer:
+            if ICMP in packet:
+                icmp_layer = packet[ICMP]
                 logger.debug(f"  Type:                   {icmp_layer.type}")
                 logger.debug(f"  Code:                   {icmp_layer.code}")
                 logger.debug(f"  Checksum:               {icmp_layer.chksum}")
 
-            if arp_layer:
+            if ARP in packet:
+                arp_layer = packet[ARP]
                 logger.debug(f"  Hardware Type:          {arp_layer.hwtype}")
                 logger.debug(f"  Protocol Type:          {arp_layer.ptype}")
                 logger.debug(f"  Hardware Size:          {arp_layer.hwlen}")
@@ -114,14 +117,20 @@ def log_detailed_info(logger, packet, args):
                 logger.debug(f"  Destination MAC:        {arp_layer.hwdst}")
                 logger.debug(f"  Destination IP:         {arp_layer.pdst}")
 
-            if raw_layer:
+            if Raw in packet:
+                raw_layer = packet[Raw]
                 payload = raw_layer.load
                 logger.debug(f"  Payload Length:         {len(payload)} bytes")
                 logger.debug(f"  Payload Sample:         {payload[:20].hex()}...")
-                if args.full_payload in ['yes', 'true', 1]:
-                    logger.debug(f"  Payload Full:           {payload.hex()}")
-                else:
-                    logger.debug(f"  Payload Full:           <disabled>")
+                try:
+                    payload_str = payload.decode('ascii')
+                    logger.debug(f"  Payload ASCII:          {payload_str}")
+                except UnicodeDecodeError:
+                    logger.debug(f"  Payload Non-ASCII (Hex): {payload[:20].hex()}...")
+                    if args.full_payload in ['yes', 'true', 1]:
+                        logger.debug(f"  Payload Full (Hex):     {payload.hex()}")
+                    else:
+                        logger.debug(f"  Payload Full:           <disabled>")
     except Exception as e:
         logger.error(f"Error in log_detailed_info: {e}")
 
@@ -161,72 +170,80 @@ def log_dns_details(logger, packet):
     except Exception as e:
         logger.error(f"Error in log_dns_details: {e}")
 
-def process_packet(packet, target_ip: str, local_ip: str, logger, show_dns: bool, args):
+def process_packet(packet, target_ip: str, local_ip: str, logger, show_dns: bool, args, captured_packets):
     try:
         if IP in packet:
             ip_layer = packet[IP]
             if ip_layer.src == target_ip or ip_layer.dst == target_ip:
                 if ip_layer.src != local_ip and ip_layer.dst != local_ip:
-                    packet_type = "SENT" if ip_layer.src == target_ip else "RECEIVED"
-                    log_packet_info(logger, packet_type, ip_layer, len(packet))
+                    packet_type = "Unassigned"
+                else:
+                    packet_type = "Assigned"
+                
+                log_packet_info(logger, packet_type, ip_layer, len(packet))
+                log_detailed_info(logger, packet, args)
+                
+                if show_dns and packet.haslayer(DNS):
+                    log_dns_details(logger, packet)
 
-                    if args.verbose:
-                        log_detailed_info(logger, packet, args)
-
-                    if show_dns:
-                        log_dns_details(logger, packet)
-        elif ARP in packet:
-            arp_layer = packet[ARP]
-            if arp_layer.psrc == target_ip or arp_layer.pdst == target_ip:
-                packet_type = "SENT" if arp_layer.psrc == target_ip else "RECEIVED"
-                logger.info(
-                    f"TYPE: {packet_type:6} ARP: {arp_layer.psrc:15} -> {arp_layer.pdst:15} "
-                    f"HW: {arp_layer.hwsrc} -> {arp_layer.hwdst}"
-                )
-                if args.verbose:
-                    log_detailed_info(logger, packet, args)
+                # Append captured packet details to captured_packets
+                captured_packets.append({
+                    "src": ip_layer.src,
+                    "dst": ip_layer.dst,
+                    "protocol": protocol_name(ip_layer.proto),
+                    "length": len(packet),
+                    "timestamp": str(packet.time),
+                    "raw": bytes(packet).hex()
+                })
     except Exception as e:
         logger.error(f"Error in process_packet: {e}")
 
+def save_captured_packets(captured_packets, filename):
+    try:
+        with open(filename, 'w') as f:
+            json.dump(captured_packets, f, indent=4)
+        logger.info(f"Captured packets saved to {filename}")
+    except Exception as e:
+        logger.error(f"Error saving captured packets: {e}")
+
+def print_summary(captured_packets):
+    total_packets = len(captured_packets)
+    logger.info(f"\n--- Summary of Captured Packets ---")
+    logger.info(f"Total Packets: {total_packets}")
+    protocol_count = {}
+    
+    for packet in captured_packets:
+        protocol = packet["protocol"]
+        if protocol not in protocol_count:
+            protocol_count[protocol] = 0
+        protocol_count[protocol] += 1
+
+    for proto, count in protocol_count.items():
+        logger.info(f"{proto}: {count}")
+
 def main():
     args = parse_arguments()
-    setup_logging(log_file=args.logfile, debug=args.verbose)
-    
-    logger.info("Sniffy: A simple IP sniffer. Made by Kevin Alavik")
+    setup_logging(args.logfile, args.verbose)
 
-    local_ip = None
-    try:
-        if args.interface:
-            addrs = netifaces.ifaddresses(args.interface)
-            if netifaces.AF_INET not in addrs:
-                logger.error(f"Error: {args.interface} does not have an IPv4 address.")
-                sys.exit(1)
-            local_ip = addrs[netifaces.AF_INET][0]["addr"]
-            if local_ip != args.target_ip:
-                logger.info(f"Using interface {args.interface} with IP address {local_ip}")
-        else:
-            logger.info("No specific network interface provided; using default.")
-            local_ip = netifaces.ifaddresses(netifaces.interfaces()[0])[netifaces.AF_INET][0]["addr"]
-    except Exception as e:
-        logger.error(f"Error retrieving local IP address: {e}")
+    if not args.interface:
+        logger.error("Network interface is required. Use --interface to specify one.")
         sys.exit(1)
 
-    sniff_filter = args.filter or ""
-    if args.protocol:
-        sniff_filter += f" and {args.protocol}"
+    local_ip = netifaces.ifaddresses(args.interface)[netifaces.AF_INET][0]['addr']
+    logger.info(f"Local IP: {local_ip}")
+    logger.info(f"Target IP: {args.target_ip}")
 
-    try:
-        sniff(
-            iface=args.interface,
-            filter=sniff_filter,
-            prn=lambda pkt: process_packet(pkt, args.target_ip, local_ip, logger, args.show_dns, args),
-            timeout=args.timeout,
-            count=args.packet_count
-        )
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        logger.error(f"Exception details: {sys.exc_info()}")
-        sys.exit(1)
+    captured_packets = []
+
+    def packet_callback(packet):
+        process_packet(packet, args.target_ip, local_ip, logger, args.show_dns, args, captured_packets)
+
+    sniff(iface=args.interface, prn=packet_callback, count=args.packet_count, timeout=args.timeout)
+
+    if args.save:
+        save_captured_packets(captured_packets, args.save)
+
+    print_summary(captured_packets)
 
 if __name__ == "__main__":
     main()
